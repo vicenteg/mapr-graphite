@@ -7,6 +7,7 @@ import sys
 import time
 import json
 from string import Template
+from daemon import Daemon
 
 try:
 	import argparse
@@ -31,7 +32,7 @@ def get_metrics(webserver_url, username, password, params):
 		r = requests.get(webserver_url, auth=(username,password), verify=False, params=params)
 	except requests.exceptions.ConnectionError as error:
 		print >>sys.stderr, "Error connecting: %s" % error
-		sys.exit(1)
+		raise
 
 	try:
 		r.raise_for_status()
@@ -44,12 +45,11 @@ def get_metrics(webserver_url, username, password, params):
 	return data
 
 def main():
-	seconds_delay = 10	
 	schema = "https"
 
 	parser = argparse.ArgumentParser(
 		description='Obtain the ansible inventory from a running MapR cluster.')
-	parser.add_argument('webserver', type=str,
+	parser.add_argument('--webserver', type=str,
 		help='the hostname or IP of a node running mapr-webserver.')
 	parser.add_argument('--no-ssl', default=False, action='store_true',
 		help='do not use SSL to connect.')
@@ -59,7 +59,11 @@ def main():
 		help='MCS username')
 	parser.add_argument('--password', default='mapr', type=str,
 		help='MCS password')
-	parser.add_argument('--list', action='store_true')
+	group = parser.add_mutually_exclusive_group(required=True)
+	group.add_argument('--foreground', action='store_true')
+	group.add_argument('--start', action='store_true')
+	group.add_argument('--stop', action='store_true')
+	group.add_argument('--restart', action='store_true')
 	parser.add_argument('--nodes', type=str, default=platform.node(),
 		help='Node to get metrics for')
 	parser.add_argument('--statsd', type=str,
@@ -75,66 +79,100 @@ def main():
 	if args.no_ssl:
 		schema = "http"
 	webserver_url = "%s://%s:%d/rest/node/metrics" % (schema, webserver, port)
-	metric_template = Template('cluster.$node.$grouping.$obj.$metric')
 
-	last_values = { }
-	while True:
-		end = datetime.datetime.now()
-		start = end - timedelta(seconds=seconds_delay)
-		ms_start = int(start.strftime('%s')) * 1000
-		ms_end = int(end.strftime('%s')) * 1000
-		params = { 'nodes': nodes, 'start': ms_start, 'end': ms_end }
+	m = Metrics2Statsd(statsd_host, 8125, nodes, webserver_url, username, password)
+	if args.start:
+		m.start()
+	elif args.restart:
+		m.restart()
+	elif args.stop:
+		m.stop()
+	elif args.foreground:
+		m.run()
+	
 
-		all_metrics = get_metrics(webserver_url, username, password, params)
-		if len(all_metrics) > 0:
-			for d in all_metrics[-1:]:
-				node = d['NODE']
-				for group in ('DISKS','CPUS','NETWORK'):
-					group_metrics(statsd_host, group, last_values, d, counter=True)
-				send_gauge(statsd_host, metric_template.substitute(node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
+class Metrics2Statsd(Daemon):
+	def __init__(self, statsd_host, statsd_port, nodes, webserver_url, username='mapr', password='mapr'):
+		self.metric_template = Template('cluster.$node.$grouping.$obj.$metric')
+		self.statsd_host = statsd_host
+		self.statsd_port = statsd_port
+		self.webserver_url = webserver_url
+		self.nodes = nodes
+		self.username = username
+		self.password = password
+		self.failed_attempts = 0
+		self.last_values = { }
 
-				rpccount_metric = metric_template.substitute(node=node, grouping='node', obj='rpc', metric='count')
-				if rpccount_metric in last_values:
-					send_counter(statsd_host, rpccount_metric, last_values[rpccount_metric], d['RPCCOUNT'])	
-				last_values[rpccount_metric] = d['RPCCOUNT']
+		super(Metrics2Statsd, self).__init__('/var/run/metrics2statsd.pid', home_dir='/tmp')
 
-				rpcinbytes_metric = metric_template.substitute(node=node, grouping='node', obj='rpc', metric='inbytes')
-				if rpcinbytes_metric in last_values:
-					send_counter(statsd_host, rpcinbytes_metric, last_values[rpcinbytes_metric], d['RPCINBYTES'])	
-				last_values[rpcinbytes_metric] = d['RPCINBYTES']
+	def run(self):
+		seconds_delay = 10	
 
-				rpcoutbytes_metric = metric_template.substitute(node=node, grouping='node', obj='rpc', metric='outbytes')
-				if rpcoutbytes_metric in last_values:
-					send_counter(statsd_host, rpcoutbytes_metric, last_values[rpcoutbytes_metric], d['RPCOUTBYTES'])	
-				last_values[rpcoutbytes_metric] = d['RPCOUTBYTES']
+		while True:
+			end = datetime.datetime.now()
+			start = end - timedelta(seconds=seconds_delay)
+			ms_start = int(start.strftime('%s')) * 1000
+			ms_end = int(end.strftime('%s')) * 1000
+			params = { 'nodes': self.nodes, 'start': ms_start, 'end': ms_end }
 
-		time.sleep(seconds_delay)
+			try:
+				all_metrics = get_metrics(self.webserver_url, self.username, self.password, params)
+				self.failed_attempts = 0
+			except requests.exceptions.ConnectionError as error:
+				self.failed_attempts += 1
+				if self.failed_attempts > 5:
+					print >>sys.stderr, "Failed 5 times, exiting."
+					sys.exit(1)
+				continue
 
-def group_metrics(statsd_host, group, last_values, all_metrics, statsd_port=8125, counter=True):
-	metric_template = Template('cluster.$node.$grouping.$obj.$metric')
-	node = all_metrics['NODE']
+			if len(all_metrics) > 0:
+				for d in all_metrics[-1:]:
+					node = d['NODE']
+					for group in ('DISKS','CPUS','NETWORK'):
+						self.group_metrics(group, self.last_values, d)
+					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
+					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
+					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
 
-	for (obj, obj_metrics) in all_metrics[group].items():
-		for (metric_name, value) in obj_metrics.items():
-			metric = metric_template.substitute(node=node, grouping=group.lower(), obj=obj, metric=metric_name)
-			delta = 0
-			if metric in last_values:
-				if counter:
-					send_counter(statsd_host, metric, last_values[metric], value, statsd_port=statsd_port)
-				else:
-					send_gauge(statsd_host, metric, value, statsd_port=statsd_port)
-			last_values[metric] = value
+					rpccount_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='count')
+					if rpccount_metric in self.last_values:
+						self.send_counter(rpccount_metric, self.last_values[rpccount_metric], d['RPCCOUNT'])	
+					self.last_values[rpccount_metric] = d['RPCCOUNT']
 
-def send_gauge(statsd_host, metric, value, statsd_port=8125):
-	statsd_client = statsd.StatsClient(statsd_host, statsd_port)
-	statsd_client.gauge(metric, value)
+					rpcinbytes_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='inbytes')
+					if rpcinbytes_metric in self.last_values:
+						self.send_counter(rpcinbytes_metric, self.last_values[rpcinbytes_metric], d['RPCINBYTES'])	
+					self.last_values[rpcinbytes_metric] = d['RPCINBYTES']
+
+					rpcoutbytes_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='outbytes')
+					if rpcoutbytes_metric in self.last_values:
+						self.send_counter(rpcoutbytes_metric, self.last_values[rpcoutbytes_metric], d['RPCOUTBYTES'])	
+					self.last_values[rpcoutbytes_metric] = d['RPCOUTBYTES']
+			time.sleep(seconds_delay)
+		
+
+	def group_metrics(self, group, last_values, all_metrics, statsd_port=8125):
+		metric_template = Template('cluster.$node.$grouping.$obj.$metric')
+		node = all_metrics['NODE']
+
+		for (obj, obj_metrics) in all_metrics[group].items():
+			for (metric_name, value) in obj_metrics.items():
+				metric = metric_template.substitute(node=node, grouping=group.lower(), obj=obj, metric=metric_name)
+				delta = 0
+				if metric in last_values:
+					self.send_counter(metric, last_values[metric], value)
+				last_values[metric] = value
+
+	def send_gauge(self, metric, value):
+		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
+		statsd_client.gauge(metric, value)
 
 
-def send_counter(statsd_host, metric, last_value, value, statsd_port=8125):
-	statsd_client = statsd.StatsClient(statsd_host, statsd_port)
-	delta = value - last_value
-	if delta > 0:
-		statsd_client.incr(metric, delta)
+	def send_counter(self, metric, last_value, value):
+		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
+		delta = value - last_value
+		if delta > 0:
+			statsd_client.incr(metric, delta)
 
 
 if __name__ == "__main__": main()
