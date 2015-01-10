@@ -1,13 +1,12 @@
 import datetime
 from datetime import timedelta
-import subprocess
 import sys
 import platform
 import sys
 import time
-import json
 from string import Template
 from daemon import Daemon
+import logging
 
 try:
 	import argparse
@@ -27,20 +26,30 @@ except ImportError:
 	print >>sys.stderr, "Please install the requests module."
 	sys.exit(1)
 
+logging.basicConfig(
+	filename='/opt/mapr/logs/metrics2statsd.log',
+	level=logging.DEBUG,
+	format='%(asctime)s %(name)s %(levelname)s %(message)s')
+logger = logging.getLogger('metrics2statsd')
+
 def get_metrics(webserver_url, username, password, params):
 	try:
+		logger.debug("getting metrics from '%s' - params = %s" % (webserver_url, params))
 		r = requests.get(webserver_url, auth=(username,password), verify=False, params=params)
 	except requests.exceptions.ConnectionError as error:
 		print >>sys.stderr, "Error connecting: %s" % error
+		logger.warn("Connection error: %s" % error)
 		raise
 
 	try:
 		r.raise_for_status()
 	except requests.exceptions.HTTPError as error:
 		print >>sys.stderr, "Request was not successful: %s" % error
+		logger.error("HTTP error getting metrics from '%s' - %s" % (webserver_url, error))
 		sys.exit(1)
 
 	response = r.json()
+	logger.debug("Got some JSON, 'data' key has %d objects", len(response['data']))
 	data = response['data']
 	return data
 
@@ -120,6 +129,7 @@ class Metrics2Statsd(Daemon):
 				self.failed_attempts = 0
 			except requests.exceptions.ConnectionError as error:
 				self.failed_attempts += 1
+				logger.warn("Error connecting to %s, have experienced %d errors so far.", self.webserver_url, self.failed_attempts)
 				if self.failed_attempts > 5:
 					print >>sys.stderr, "Failed 5 times, exiting."
 					sys.exit(1)
@@ -129,7 +139,8 @@ class Metrics2Statsd(Daemon):
 				for d in all_metrics[-1:]:
 					node = d['NODE']
 					for group in ('DISKS','CPUS','NETWORK'):
-						self.group_metrics(group, self.last_values, d)
+						if group in d:
+							self.group_metrics(group, self.last_values, d)
 					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
 					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
 					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
@@ -164,11 +175,13 @@ class Metrics2Statsd(Daemon):
 				last_values[metric] = value
 
 	def send_gauge(self, metric, value):
+		logger.debug("Sending gauge %s, value '%d' to statsd host '%s:%d'", metric, value, self.statsd_host, self.statsd_port)
 		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
 		statsd_client.gauge(metric, value)
 
 
 	def send_counter(self, metric, last_value, value):
+		logger.debug("Sending counter %s, value '%d' to statsd host '%s:%d'", metric, value, self.statsd_host, self.statsd_port)
 		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
 		delta = value - last_value
 		if delta > 0:
