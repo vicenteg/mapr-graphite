@@ -6,8 +6,10 @@ import platform
 import sys
 import time
 from string import Template
-from daemon import Daemon
 import logging
+import re
+
+from daemon import Daemon
 
 try:
 	import argparse
@@ -103,7 +105,7 @@ def main():
 
 class Metrics2Statsd(Daemon):
 	def __init__(self, statsd_host, statsd_port, nodes, webserver_url, username='mapr', password='mapr'):
-		self.metric_template = Template('cluster.$node.$grouping.$obj.$metric')
+		self.metric_template = Template('mapr.$cluster.$node.$grouping.$obj.$metric')
 		self.statsd_host = statsd_host
 		self.statsd_port = statsd_port
 		self.webserver_url = webserver_url
@@ -112,8 +114,19 @@ class Metrics2Statsd(Daemon):
 		self.password = password
 		self.failed_attempts = 0
 		self.last_values = { }
+		self.statsd_client = statsd.StatsClient(statsd_host, statsd_port)
 
+		self.cluster_name = self.get_cluster_name()
 		super(Metrics2Statsd, self).__init__('/var/run/metrics2statsd.pid', home_dir='/tmp')
+
+	def get_cluster_name(self):
+		cluster_name = None
+		with file('/opt/mapr/conf/mapr-clusters.conf') as clusters_conf:
+			firstline = clusters_conf.readline()
+			cluster_name = re.split('\s+', firstline)[0]
+			logger.debug("cluster name is '%s'", cluster_name)
+		return re.sub('\.', '_', cluster_name)
+			
 
 	def run(self):
 		seconds_delay = 10	
@@ -142,21 +155,21 @@ class Metrics2Statsd(Daemon):
 					for group in ('DISKS','CPUS','NETWORK'):
 						if group in d:
 							self.group_metrics(group, self.last_values, d)
-					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
-					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
-					self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
+					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
+					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
+					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
 
-					rpccount_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='count')
+					rpccount_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='count')
 					if rpccount_metric in self.last_values:
 						self.send_counter(rpccount_metric, self.last_values[rpccount_metric], d['RPCCOUNT'])	
 					self.last_values[rpccount_metric] = d['RPCCOUNT']
 
-					rpcinbytes_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='inbytes')
+					rpcinbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='inbytes')
 					if rpcinbytes_metric in self.last_values:
 						self.send_counter(rpcinbytes_metric, self.last_values[rpcinbytes_metric], d['RPCINBYTES'])	
 					self.last_values[rpcinbytes_metric] = d['RPCINBYTES']
 
-					rpcoutbytes_metric = self.metric_template.substitute(node=node, grouping='node', obj='rpc', metric='outbytes')
+					rpcoutbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='outbytes')
 					if rpcoutbytes_metric in self.last_values:
 						self.send_counter(rpcoutbytes_metric, self.last_values[rpcoutbytes_metric], d['RPCOUTBYTES'])	
 					self.last_values[rpcoutbytes_metric] = d['RPCOUTBYTES']
@@ -164,12 +177,11 @@ class Metrics2Statsd(Daemon):
 		
 
 	def group_metrics(self, group, last_values, all_metrics, statsd_port=8125):
-		metric_template = Template('cluster.$node.$grouping.$obj.$metric')
 		node = all_metrics['NODE']
 
 		for (obj, obj_metrics) in all_metrics[group].items():
 			for (metric_name, value) in obj_metrics.items():
-				metric = metric_template.substitute(node=node, grouping=group.lower(), obj=obj, metric=metric_name)
+				metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping=group.lower(), obj=obj, metric=metric_name)
 				delta = 0
 				if metric in last_values:
 					self.send_counter(metric, last_values[metric], value)
@@ -177,16 +189,14 @@ class Metrics2Statsd(Daemon):
 
 	def send_gauge(self, metric, value):
 		logger.debug("Sending gauge %s, value '%d' to statsd host '%s:%d'", metric, value, self.statsd_host, self.statsd_port)
-		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
-		statsd_client.gauge(metric, value)
+		self.statsd_client.gauge(metric, value)
 
 
 	def send_counter(self, metric, last_value, value):
 		logger.debug("Sending counter %s, value '%d' to statsd host '%s:%d'", metric, value, self.statsd_host, self.statsd_port)
-		statsd_client = statsd.StatsClient(self.statsd_host, self.statsd_port)
 		delta = value - last_value
 		if delta > 0:
-			statsd_client.incr(metric, delta)
+			self.statsd_client.incr(metric, delta)
 
 
 if __name__ == "__main__":
@@ -196,5 +206,5 @@ if __name__ == "__main__":
 		logger.info('Exiting due to %s', e)
 		sys.exit(1)
 	except Exception as e:
-		logger.error('Caught unknown exception %s', e)
+		logger.error('Caught unknown exception %s: %s', type(e), e)
 		sys.exit(1)
