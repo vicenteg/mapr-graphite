@@ -155,29 +155,44 @@ class Metrics2Statsd(Daemon):
 					for group in ('DISKS','CPUS','NETWORK'):
 						if group in d:
 							self.group_metrics(group, self.last_values, d)
-					if 'MEMORYUSED' in d:
+					try:
 						self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
+					except KeyError as e:
+						logger.warn('%s not in metrics data.', e)
 
-					if 'SERVAVAILSIZEMB' in d:
+					try:
 						self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
+					except KeyError as e:
+						logger.warn('%s not in metrics data.', e)
 
-					if 'SERVUSEDSIZEMB' in d:
+					try:
 						self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
+					except KeyError as e:
+						logger.warn('%s not in metrics data.', e)
 
-					rpccount_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='count')
-					if rpccount_metric in self.last_values:
-						self.send_counter(rpccount_metric, self.last_values[rpccount_metric], d['RPCCOUNT'])	
-					self.last_values[rpccount_metric] = d['RPCCOUNT']
+					try:
+						rpccount_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='count')
+						if rpccount_metric in self.last_values:
+							self.send_counter(rpccount_metric, self.last_values[rpccount_metric], d['RPCCOUNT'])	
+						self.last_values[rpccount_metric] = d['RPCCOUNT']
+					except KeyError as e:
+						logger.warn('%s is not in metrics data.', e)
 
-					rpcinbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='inbytes')
-					if rpcinbytes_metric in self.last_values:
-						self.send_counter(rpcinbytes_metric, self.last_values[rpcinbytes_metric], d['RPCINBYTES'])	
-					self.last_values[rpcinbytes_metric] = d['RPCINBYTES']
+					try:
+						rpcinbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='inbytes')
+						if rpcinbytes_metric in self.last_values:
+							self.send_counter(rpcinbytes_metric, self.last_values[rpcinbytes_metric], d['RPCINBYTES'])	
+						self.last_values[rpcinbytes_metric] = d['RPCINBYTES']
+					except KeyError as e:
+						logger.warn('%s is not in metrics data.', e)
 
-					rpcoutbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='outbytes')
-					if rpcoutbytes_metric in self.last_values:
-						self.send_counter(rpcoutbytes_metric, self.last_values[rpcoutbytes_metric], d['RPCOUTBYTES'])	
-					self.last_values[rpcoutbytes_metric] = d['RPCOUTBYTES']
+					try:
+						rpcoutbytes_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='outbytes')
+						if rpcoutbytes_metric in self.last_values:
+							self.send_counter(rpcoutbytes_metric, self.last_values[rpcoutbytes_metric], d['RPCOUTBYTES'])	
+						self.last_values[rpcoutbytes_metric] = d['RPCOUTBYTES']
+					except KeyError as e:
+						logger.warn('%s is not in metrics data.', e)
 			time.sleep(seconds_delay)
 		
 
