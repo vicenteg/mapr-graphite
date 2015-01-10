@@ -1,3 +1,4 @@
+import signal
 import datetime
 from datetime import timedelta
 import sys
@@ -188,4 +189,12 @@ class Metrics2Statsd(Daemon):
 			statsd_client.incr(metric, delta)
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+	try:
+		main()
+	except KeyboardInterrupt as e:
+		logger.info('Exiting due to %s', e)
+		sys.exit(1)
+	except Exception as e:
+		logger.error('Caught unknown exception %s', e)
+		sys.exit(1)
