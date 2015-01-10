@@ -155,9 +155,14 @@ class Metrics2Statsd(Daemon):
 					for group in ('DISKS','CPUS','NETWORK'):
 						if group in d:
 							self.group_metrics(group, self.last_values, d)
-					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
-					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
-					self.send_gauge(self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
+					if 'MEMORYUSED' in d:
+						self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='memory', metric='used'), d['MEMORYUSED'])	
+
+					if 'SERVAVAILSIZEMB' in d:
+						self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='avail'), d['SERVAVAILSIZEMB'])
+
+					if 'SERVUSEDSIZEMB' in d:
+						self.send_gauge(self.metric_template.substitute(node=node, grouping='node', obj='size', metric='used'), d['SERVUSEDSIZEMB'])
 
 					rpccount_metric = self.metric_template.substitute(cluster=self.cluster_name, node=node, grouping='node', obj='rpc', metric='count')
 					if rpccount_metric in self.last_values:
